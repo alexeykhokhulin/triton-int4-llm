@@ -25,7 +25,7 @@ def main() -> None:
         args.device
     )
     model.eval()
-    replace_linear_with_int4(model)
+    model = replace_linear_with_int4(model)
     model.save_pretrained(args.output)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     tokenizer.save_pretrained(args.output)

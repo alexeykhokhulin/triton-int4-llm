@@ -3,6 +3,7 @@ import math
 import pytest
 import torch
 
+from triton_int4.quant_layer import Int4PackedLinear, replace_linear_with_int4
 from triton_int4.triton_kernels.quant_i4_pack8 import (
     dequantize_i4_pack8,
     quantize_i4_pack8,
@@ -42,3 +43,33 @@ def test_matmul_matches_fp16(device):
     out_ref = torch.matmul(a.to(torch.float16), w.t()).to(torch.float32)
     max_err = (out_int4 - out_ref).abs().max()
     assert max_err < 0.5
+
+
+def test_int4_linear_layer(device):
+    linear = torch.nn.Linear(64, 128, bias=True, device=device, dtype=torch.float16)
+    x = torch.randn(32, 64, dtype=torch.float16, device=device)
+    ref = linear(x).to(torch.float32)
+    packed = Int4PackedLinear(linear)
+    out = packed(x)
+    assert out.shape == ref.shape
+    assert (out - ref).abs().max() < 1.0
+
+
+def test_replace_linear_recursively(device):
+    class Toy(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.ffn = torch.nn.Sequential(
+                torch.nn.Linear(32, 64, bias=False, device=device, dtype=torch.float16),
+                torch.nn.Linear(64, 16, bias=False, device=device, dtype=torch.float16),
+            )
+
+        def forward(self, x):
+            return self.ffn(x)
+
+    model = Toy().to(device)
+    replace_linear_with_int4(model)
+    for module in model.modules():
+        if module is model:
+            continue
+        assert not isinstance(module, torch.nn.Linear)

@@ -15,7 +15,7 @@ class Int4PackedLinear(nn.Module):
         self.register_buffer("weight", packed)
         self.register_buffer("scales", scales)
         if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach())
+            self.register_buffer("bias", linear.bias.detach().to(torch.float32))
         else:
             self.bias = None
 

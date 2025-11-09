@@ -102,4 +102,4 @@ def dequantize_i4_pack8(
         vals = vals.view(m, -1)
         chunk = vals.to(torch.float32) - 8.0
         out[:, lane::elems_per_pack] = chunk * scales[:, None]
-    return out 
+    return out
