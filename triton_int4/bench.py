@@ -98,8 +98,6 @@ def main() -> None:
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA required for benchmark")
     device = args.device
-    if device.startswith("cuda"):
-        torch.cuda.set_device(device)
     shapes = load_shapes(args.model)
     tokens = list(parse_tokens(args.tokens))
     print("tokens,out,in,int4_ms,fp16_ms,speedup")

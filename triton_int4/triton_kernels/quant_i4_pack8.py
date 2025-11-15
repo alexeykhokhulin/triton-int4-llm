@@ -47,10 +47,6 @@ def _quant_pack(
     ptrs = x_ptr + pid_m * stride_x_m + base_cols * stride_x_n
     vals = tl.load(ptrs, mask=mask_cols, other=0.0).to(tl.float32)
 
-    # x = vals / scales
-    # qf = tl.where(x >= 0, tl.math.floor(x + 0.5), tl.math.ceil(x - 0.5))
-    # qf = tl.maximum(tl.minimum(qf, 7.0), -8.0)
-    # q  = qf.to(tl.int32) + 8                                              # 0..15
     x = vals / scales
     f = tl.math.floor(x)
     r = tl.math.floor(x + 0.5)
