@@ -7,6 +7,15 @@ import triton.language as tl
 DTYPE_TO_PACK = {"int8": 2, "int32": 8}
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=3),
+        triton.Config({}, num_warps=8, num_stages=3),
+    ],
+    key=["M", "N", "K"],
+)
 @triton.jit
 def _matmul_kernel(
     a_ptr,
@@ -37,38 +46,71 @@ def _matmul_kernel(
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
+    mask_m = offs_m < M
+    mask_n = offs_n < N
+
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    # lanes & shifts — один раз на kernel, а не в каждом inner-цикле
+    lanes = tl.arange(0, elems_per_pack)
+    shifts = (lanes[:, None] * 4).to(tl.int32)
 
     for k_iter in range(NUM_K):
         k_start = k_iter * BLOCK_K
 
         for pack_idx in range(BLOCK_K // elems_per_pack):
             pack_col = (k_start // elems_per_pack) + pack_idx
-            mask_col = pack_col < PACKS_PER_ROW
+            mask_pack = pack_col < PACKS_PER_ROW
 
+            # загружаем packed B
             b_ptrs = b_ptr + offs_n * stride_bo + pack_col * stride_bp
-            packs = tl.load(b_ptrs, mask=(offs_n < N) & mask_col, other=0).to(tl.int32)
+            packs = tl.load(
+                b_ptrs,
+                mask=mask_n & mask_pack,
+                other=0,
+            ).to(tl.int32)
 
+            # загружаем scales
             s_ptrs = scales_ptr + offs_n * stride_scales_n + pack_col * stride_scales_p
-            scales = tl.load(s_ptrs, mask=(offs_n < N) & mask_col, other=0.0).to(tl.float32)
+            scales = tl.load(
+                s_ptrs,
+                mask=mask_n & mask_pack,
+                other=0.0,
+            ).to(tl.float32)
 
-            lanes = tl.arange(0, elems_per_pack)
+            # соответствующие этому pack’у K-колонки
             k_cols = k_start + pack_idx * elems_per_pack + lanes
             mask_k = k_cols < K
 
-            a_ptrs_l = a_ptr + offs_m[:, None] * stride_am + k_cols[None, :] * stride_ak
+            # грузим A по этим колонкам K
+            a_ptrs_l = (
+                a_ptr
+                + offs_m[:, None] * stride_am
+                + k_cols[None, :] * stride_ak
+            )
             a_lanes = tl.load(
-                a_ptrs_l, mask=(offs_m[:, None] < M) & (mask_k[None, :]), other=0.0
+                a_ptrs_l,
+                mask=mask_m[:, None] & mask_k[None, :],
+                other=0.0,
             ).to(tl.float32)  # [BM, L]
 
-            shifts = (lanes[:, None] * 4).to(tl.int32)
+            # распаковываем int4 и применяем scale
             nibbles = ((packs[None, :] >> shifts) & 0xF).to(tl.float32) - 8.0  # [L, BN]
-            b_lanes = tl.where(mask_k[:, None], nibbles * scales[None, :], 0.0)
+            b_lanes = tl.where(
+                mask_k[:, None],
+                nibbles * scales[None, :],
+                0.0,
+            )
 
+            # маленький GEMM по L
             acc += tl.sum(a_lanes[:, :, None] * b_lanes[None, :, :], axis=1)
 
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
-    tl.store(c_ptrs, acc, mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
+    tl.store(
+        c_ptrs,
+        acc,
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
 
 
 def matmul_bf16_i4(
