@@ -1,6 +1,8 @@
 import argparse
 import math
 import time
+from tqdm.auto import tqdm
+
 from typing import Iterable, Optional, Tuple
 
 import torch
@@ -14,8 +16,12 @@ from triton_int4.quant_layer import replace_linear_with_int4
 def parse_args() -> argparse.Namespace:
     """Parses args."""
     parser = argparse.ArgumentParser(description="WikiText-2 perplexity + speed")
-    parser.add_argument("model", help="model name or path")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "model", help="model name or path", default="unsloth/Llama-3.2-1B-Instruct"
+    )
+    parser.add_argument(
+        "--device", default="cuda" if torch.cuda.is_available() else "cpu"
+    )
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument("--quantize", action="store_true")
@@ -26,6 +32,8 @@ def parse_args() -> argparse.Namespace:
 
 def chunk_tokens(tokenizer, text: str, seq_len: int) -> torch.Tensor:
     ids = tokenizer(text, return_tensors="pt")["input_ids"][0]
+    if ids.numel() < seq_len:
+        return ids.new_empty((0, seq_len))
     return ids.unfold(0, seq_len, seq_len)
 
 
@@ -52,7 +60,12 @@ def evaluate(
     total_time = 0.0
     use_cuda = device.startswith("cuda") and torch.cuda.is_available()
     model.eval()
-    for sample in iter_dataset(dataset, limit):
+
+    total_samples = min(limit, len(dataset)) if limit > 0 else len(dataset)
+
+    for sample in tqdm(
+        iter_dataset(dataset, limit), total=total_samples, desc="Evaluating"
+    ):
         text = sample["text"].strip()
         if not text:
             continue
@@ -85,14 +98,19 @@ def evaluate(
                 total_time += time.perf_counter() - start_time
             total_loss += loss.item()
             total_tokens += targets.numel()
+
     ppl = math.exp(total_loss / total_tokens)
     tokens_per_s = total_tokens / total_time if total_time > 0 else 0.0
     return ppl, tokens_per_s
 
 
-def run_eval(args, quantize: bool, dataset: Optional[Dataset] = None) -> Tuple[float, float]:
+def run_eval(
+    args, quantize: bool, dataset: Optional[Dataset] = None
+) -> Tuple[float, float]:
     device = args.device
-    model = AutoModelForCausalLM.from_pretrained(args.model, torch_dtype=torch.float16).to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype=torch.float16
+    ).to(device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if quantize:
         model = replace_linear_with_int4(model)

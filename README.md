@@ -85,3 +85,34 @@ Which is exactly what you expect when:
 - and your custom kernel is doing on-the-fly bit unpacking and scaling for int4 without using native int4 Tensor Core instructions or hyper-optimized layouts.
 
 From here, the interesting part is not “can we beat cuBLAS in three files of Triton”, but “what does this quantization scheme look like end-to-end when plugged into LLaMA’s linear layers and measured on perplexity + throughput” - that’s what the next tasks will cover.
+
+## Int4 Linear Layers in LLaMA-3.2-1B
+
+After the kernels were in place, the next step was to actually *swap them into a real model*.
+
+
+In [`quant_layer.py`](triton_int4/quant_layer.py):
+
+- `Int4PackedLinear` wraps an existing `nn.Linear`, quantizes its FP16 weights with [`quantize_i4_pack8`](triton_int4/triton_kernels/quant_i4_pack8.py), and uses [`matmul_bf16_i4`](triton_int4/triton_kernels/matmul_bf16_i4_pack8.py) in `forward`.
+- `replace_linear_with_int4` walks the module tree and replaces every `torch.nn.Linear` with `Int4PackedLinear`.
+
+Applied to `unsloth/Llama-3.2-1B-Instruct`, all dense layers (attention and MLP projections) are now int4-packed and computed through the custom Triton GEMM; everything else in the model stays the same.
+
+---
+
+## WikiText-2 Perplexity & Speed
+
+To evaluate the quantized model end-to-end, [`eval_wikitext2.py`](triton_int4/eval_wikitext2.py) runs WikiText-2 (`wikitext-2-raw-v1`, `test` split) in next-token-prediction mode:
+
+- sequences are chunked to `seq_len=256`,
+- batch size = 4,
+- metrics: perplexity and tokens per second (CUDA-timed).
+
+Final numbers (Triton autotune **disabled** for steady-state speed):
+
+| mode | seq_len | batch_size | perplexity | tokens/s  |
+|------|--------:|-----------:|-----------:|----------:|
+| fp16 |     256 |          4 |   21.0905  | 32711.13  |
+| int4 |     256 |          4 |   22.9485  |  8438.13  |
+
+So with all linears quantized to int4 we get ~4× smaller weights, about **+9%** worse perplexity on WikiText-2, and an end-to-end throughput that is roughly **3.9× slower** than the original fp16 model on this setup.

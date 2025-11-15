@@ -1,5 +1,5 @@
 from typing import Literal
-
+import math
 import torch
 import triton
 import triton.language as tl
@@ -83,16 +83,14 @@ def _matmul_kernel(
             mask_k = k_cols < K
 
             # грузим A по этим колонкам K
-            a_ptrs_l = (
-                a_ptr
-                + offs_m[:, None] * stride_am
-                + k_cols[None, :] * stride_ak
-            )
+            a_ptrs_l = a_ptr + offs_m[:, None] * stride_am + k_cols[None, :] * stride_ak
             a_lanes = tl.load(
                 a_ptrs_l,
                 mask=mask_m[:, None] & mask_k[None, :],
                 other=0.0,
-            ).to(tl.float32)  # [BM, L]
+            ).to(
+                tl.float32
+            )  # [BM, L]
 
             # распаковываем int4 и применяем scale
             nibbles = ((packs[None, :] >> shifts) & 0xF).to(tl.float32) - 8.0  # [L, BN]
@@ -125,14 +123,19 @@ def matmul_bf16_i4(
     """Computes A(bf16) @ (dequantize_i4(B, scales))^T, using per-pack scales."""
     if a.dtype != torch.bfloat16:
         raise TypeError("expected bf16 activations")
-    if not a.is_contiguous():
-        a = a.contiguous()
+
+    if a.ndim < 2:
+        raise ValueError("input tensor must have at least 2 dimensions")
+    *batch_dims, K = a.shape
+    M_flat = math.prod(batch_dims) if batch_dims else a.shape[0]
+
+    a_2d = a.reshape(M_flat, K).contiguous()
+
     if not b_packed.is_contiguous():
         b_packed = b_packed.contiguous()
     if not scales.is_contiguous():
         scales = scales.contiguous()
 
-    M, K = a.shape
     N, packs_per_row = b_packed.shape
     elems_per_pack = DTYPE_TO_PACK[pack_dtype]
     if packs_per_row * elems_per_pack != K:
@@ -140,26 +143,26 @@ def matmul_bf16_i4(
     if scales.shape != (N, packs_per_row):
         raise ValueError("scales must be [N, packs_per_row] to match packed weights")
 
-    out = torch.empty((M, N), dtype=torch.float32, device=a.device)
-    grid = (triton.cdiv(M, block_m), triton.cdiv(N, block_n))
+    out_2d = torch.empty((M_flat, N), dtype=torch.float32, device=a.device)
+    grid = (triton.cdiv(M_flat, block_m), triton.cdiv(N, block_n))
     num_k = (K + block_k - 1) // block_k
 
     _matmul_kernel[grid](
-        a,
+        a_2d,
         b_packed,
         scales,
-        out,
-        M,
+        out_2d,
+        M_flat,
         N,
         K,
-        a.stride(0),
-        a.stride(1),
+        a_2d.stride(0),
+        a_2d.stride(1),
         b_packed.stride(0),
         b_packed.stride(1),
         scales.stride(0),
         scales.stride(1),
-        out.stride(0),
-        out.stride(1),
+        out_2d.stride(0),
+        out_2d.stride(1),
         elems_per_pack=elems_per_pack,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
@@ -167,4 +170,9 @@ def matmul_bf16_i4(
         NUM_K=num_k,
         PACKS_PER_ROW=packs_per_row,
     )
+
+    if batch_dims:
+        out = out_2d.reshape(*batch_dims, N)
+    else:
+        out = out_2d
     return out

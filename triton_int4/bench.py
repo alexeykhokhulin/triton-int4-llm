@@ -105,7 +105,9 @@ def main() -> None:
         for t in tokens:
             int4_ms, fp16_ms = benchmark_case(t, shape, device, args.iters)
             speedup = fp16_ms / int4_ms if int4_ms > 0 else float("nan")
-            print(f"{t},{shape[0]},{shape[1]},{int4_ms:.4f},{fp16_ms:.4f},{speedup:.2f}x")
+            print(
+                f"{t},{shape[0]},{shape[1]},{int4_ms:.4f},{fp16_ms:.4f},{speedup:.2f}x"
+            )
 
 
 if __name__ == "__main__":
