@@ -5,7 +5,7 @@ Spoiler: cuBLAS is still a monster.
 
 ---
 
-## Task 1 – Int4 Quantization & Packing
+## Int4 Quantization & Packing
 
 First step was to teach the model weights how to live on a diet.
 
@@ -25,7 +25,7 @@ Net result: a lightweight int4 “codec” for model weights that is easy to plu
 
 ---
 
-## Task 2 – BF16 × Int4 Matmul (X16 @ W4ᵀ)
+## BF16 × Int4 Matmul (X16 @ W4ᵀ)
 
 Next, we needed to actually *use* those compressed weights.
 
@@ -47,7 +47,7 @@ So at this point we have a full pipeline: FP16 weights → packed int4 + scales 
 
 ---
 
-## Task 3 – Benchmarks vs FP16 GEMM (LLaMA-3.2-1B Shapes)
+## Benchmarks vs FP16 GEMM (LLaMA-3.2-1B Shapes)
 
 Finally, we benchmarked:
 
@@ -77,11 +77,11 @@ Final numbers on an H100 GPU:
 | 512        | 8192    | 2048   | 0.5025          | 0.0460          | 0.09×                  |
 | 2048       | 8192    | 2048   | 1.8509          | 0.1616          | 0.09×                  |
 
-So yes, the int4 path gives **4× smaller weights**, but on raw matmul speed it’s currently **slower than cuBLAS BF16/FP16** by about 4–15×, depending on the shape.
+So yes, the int4 path gives **4× smaller weights**, but on raw matmul speed it’s currently **slower than cuBLAS BF16/FP16** by about 4-15×, depending on the shape.
 
 Which is exactly what you expect when:
 
 - cuBLAS is tuned to death for BF16/FP16 Tensor Cores,
 - and your custom kernel is doing on-the-fly bit unpacking and scaling for int4 without using native int4 Tensor Core instructions or hyper-optimized layouts.
 
-From here, the interesting part is not “can we beat cuBLAS in three files of Triton”, but “what does this quantization scheme look like end-to-end when plugged into LLaMA’s linear layers and measured on perplexity + throughput” — that’s what the next tasks will cover.
+From here, the interesting part is not “can we beat cuBLAS in three files of Triton”, but “what does this quantization scheme look like end-to-end when plugged into LLaMA’s linear layers and measured on perplexity + throughput” - that’s what the next tasks will cover.
