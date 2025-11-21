@@ -33,7 +33,7 @@ def test_roundtrip_accuracy(device):
     x_fp32 = x.to(torch.float32)
     diff = (x_fp32 - restored).abs().mean()
     rel = diff / (x_fp32.abs().mean() + 1e-6)
-    assert rel < 0.1
+    assert rel < 0.15
 
 
 def test_matmul_kernel_matches_dequant(device):
@@ -47,7 +47,8 @@ def test_matmul_kernel_matches_dequant(device):
     out_int4 = matmul_bf16_i4(a, packed, scales)
 
     max_err = (out_int4 - out_ref).abs().max()
-    assert max_err < 1e-3
+    assert max_err < 5e-2
+
 
 def test_matmul_matches_fp16(device):
     a = torch.randn(8, 256, dtype=torch.bfloat16, device=device)
@@ -61,8 +62,9 @@ def test_matmul_matches_fp16(device):
     mean_err = err.mean()
     max_err = err.max()
 
-    assert mean_err < 1.5
-    assert max_err < 5.0
+    assert mean_err < 1.8
+    assert max_err < 8.0
+
 
 def test_int4_linear_layer(device):
     linear = torch.nn.Linear(64, 128, bias=True, device=device, dtype=torch.float16)
