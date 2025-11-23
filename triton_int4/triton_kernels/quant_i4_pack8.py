@@ -109,10 +109,13 @@ def quantize_i4_pack8(
     x32 = x.float()
     # [M, num_groups, group_size] -> max abs per group
     scales = (
-        x32.abs().view(M, num_groups, g).amax(dim=2).clamp_min(EPS) / 7.0
+        x32.abs()
+        .view(M, num_groups, g)
+        .amax(dim=2)
+        .clamp_min(EPS)
+        / 7.0
     ).contiguous()  # [M, num_groups]
 
-    # output buffer: still one int per pack
     if pack_dtype == "int8":
         out = torch.empty((M, num_packs), dtype=torch.int8, device=x.device)
     else:
@@ -159,7 +162,7 @@ def dequantize_i4_pack8(
     if K % num_groups != 0:
         raise ValueError("K must be divisible by number of groups in scales")
 
-    group_size = K // num_groups  # columns per group
+    group_size = K // num_groups
     out = torch.empty((M, K), dtype=torch.float32, device=packed.device)
 
     data = packed.to(torch.int32)  # [M, num_packs]

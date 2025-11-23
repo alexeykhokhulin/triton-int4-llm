@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "triton-int4"
+name = "triton-int4-llm"
 version = "0.1.0"
 description = "Int4 quantization kernels and utilities"
 authors = ["Alexey Khokhulin <alexei.khokhulin@gmail.com>"]
@@ -11,8 +11,6 @@ python = ">=3.10,<3.11"
 numpy = "^2.1.2"
 torch = "^2.4.1"
 triton = "^3.1.0"
-transformers = "^4.57.1"
-datasets = "^4.4.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"

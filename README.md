@@ -5,35 +5,15 @@ Spoiler: cuBLAS is still a monster.
 
 ---
 
-## Int4 Quantization & Packing
-
-First step was to teach the model weights how to live on a diet.
-
-In [`quant_i4_pack8.py`](triton_int4/triton_kernels/quant_i4_pack8.py) we implemented:
-
-- symmetric **group-wise** quantization of a 2D FP16 matrix to int4 with one scale per group of `G` columns (default `G = 256`),
-- packing of 8 int4 values into a single `int32` (or into `int8` when needed).
-
-The packed weight tensor itself uses ~25% of the original FP16 bytes (4× smaller), and with group-wise scales we get **≈4× total weight memory reduction** on LLaMA-3.2-1B-style shapes.
-
-Roundtrip and memory behavior are checked in [`tests/test_quant.py`](tests/test_quant.py):
-
-- we verify that the packed weight tensor uses ~25% of the original bytes,
-- we dequantize back and assert the mean error is small/consistent for random FP16 inputs.
-
-Net result: a lightweight int4 “codec” for model weights that is easy to plug into other components.
-
----
-
 ## Quantization Schemes: Row-wise vs Group-wise
 
-On top of the main kernel, there is a small playground for different int4 schemes in
+There is a small playground for different int4 schemes in
 [`quant_schemes.py`](triton_int4/quant/quant_schemes.py) and
 [`quant_bench.py`](triton_int4/quant/quant_bench.py):
 
-- symmetric row-wise int4 (one scale per row),
-- asymmetric row-wise int4 (scale + zero-point per row),
-- symmetric group-wise int4 with different group sizes `G`.
+- **Symmetric row-wise** int4 (one scale per row),
+- **Asymmetric row-wise** int4 (scale + zero-point per row),
+- **Symmetric group-wise** int4 with different group sizes `G` along the columns.
 
 For a representative LLaMA-3.2-1B weight matrix of shape **2048×8192**, we get:
 
@@ -46,38 +26,59 @@ For a representative LLaMA-3.2-1B weight matrix of shape **2048×8192**, we get:
 | sym group-wise (G = 256)  | 0.1083 | 3.88×                    |
 | sym group-wise (G = 512)  | 0.1158 | 3.94×                    |
 
-So there’s a clear trade-off: small groups give great MAE but less compression, large groups / row-wise give **≈4×** compression with a bit more quantization error.
+So there’s a clear trade-off:
+
+- small groups -> better MAE, but more metadata (less compression),
+- large groups / row-wise -> slightly worse MAE, but **≈4×** compression including scales.
+
 The main pipeline uses **symmetric group-wise int4 with `G = 256`** as a compromise: almost 4× smaller than FP16, noticeably better MAE than pure row-wise.
+
+---
+
+## Int4 Quantization & Packing
+
+In [`quant_i4_pack8.py`](triton_int4/triton_kernels/quant_i4_pack8.py) we implement:
+
+- symmetric **group-wise** quantization of a 2D FP16 matrix to int4 with one scale per group of `G` columns (default `G = 256`),
+- packing of 8 int4 values into a single `int32` (or into `int8` when needed).
+
+The packed weight tensor itself uses ~25% of the original FP16 bytes (4× smaller).
+With group-wise scales (`G = 256`) we get **≈3.9–4.0× total weight memory reduction** on LLaMA-3.2-1B-style shapes.
+
+Roundtrip and memory behavior are checked in [`tests/test_quant.py`](tests/test_quant.py):
+
+- we verify that the packed weight tensor uses ~25% of the original bytes,
+- we dequantize back and assert the mean error is small/consistent for random FP16 inputs.
+
+Net result: a compact int4 “codec” for model weights that is easy to plug into other components.
 
 ---
 
 ## BF16 × Int4 Matmul (X16 @ W4ᵀ)
 
-Next, we needed to actually *use* those compressed weights.
-
-In [`matmul_bf16_i4_pack8.py`](triton_int4/triton_kernels/matmul_bf16_i4_pack8.py) we wrote a Triton kernel that:
+In [`matmul_bf16_i4_pack8.py`](triton_int4/triton_kernels/matmul_bf16_i4_pack8.py) we provide a Triton kernel that:
 
 - takes BF16 activations,
 - reads the int4-packed weight matrix plus **group-wise** scales,
 - unpacks and dequantizes weights on the fly inside the matmul loop,
 - accumulates the result in FP32.
 
-This is wrapped in `matmul_bf16_i4`, which is also used by a quantized linear layer [`Int4PackedLinear`](triton_int4/quant_layer.py). That layer takes an existing `nn.Linear`, quantizes its FP16 weights once at init time, and then replaces the matmul with the BF16×Int4 kernel in `forward`.
+This is wrapped in `matmul_bf16_i4`, which is also used by the quantized linear layer [`Int4PackedLinear`](triton_int4/quant_layer.py). That layer takes an existing `nn.Linear`, quantizes its FP16 weights once at init time, and then replaces the matmul with the BF16×Int4 kernel in `forward`.
 
-Correctness is again validated in [`tests/test_quant.py`](tests/test_quant.py):
+Correctness is validated in [`tests/test_quant.py`](tests/test_quant.py):
 
 - comparing kernel output vs a reference path that explicitly dequantizes and calls `torch.matmul`,
 - checking an end-to-end `Int4PackedLinear` against the original `nn.Linear` (within an error budget appropriate for int4).
 
-So at this point we have a full pipeline: FP16 weights → packed int4 + group-wise scales → BF16×Int4 GEMM.
+So we have a full pipeline: FP16 weights -> packed int4 + group-wise scales -> BF16×Int4 GEMM.
 
 ---
 
 ## Benchmarks vs FP16 GEMM (LLaMA-3.2-1B Shapes)
 
-Finally, we benchmarked:
+We benchmarked:
 
-- **Int4 path**: `(X16 @ W4ᵀ)` via our Triton kernel `matmul_bf16_i4`,
+- **Int4 path**: `(X16 @ W4ᵀ)` via `matmul_bf16_i4`,
 - **FP16/BF16 baseline**: `(X16 @ W16ᵀ)` via `torch.matmul` (cuBLAS).
 
 Benchmarking is in [`bench.py`](triton_int4/bench.py). Shapes are taken from the config of `unsloth/Llama-3.2-1B-Instruct`:
@@ -103,20 +104,16 @@ Final numbers on an H100 GPU:
 | 512        | 8192    | 2048   | 0.4361          | 0.0457          | 0.10×                  |
 | 2048       | 8192    | 2048   | 1.6819          | 0.1629          | 0.10×                  |
 
-So yes, the int4 path gives **≈4× smaller weights**, but on raw matmul speed it’s currently **slower than cuBLAS BF16/FP16** by roughly **3–12×**, depending on the shape.
+So the int4 path gives **≈4× smaller weights**, but on raw matmul speed it is currently **slower than cuBLAS BF16/FP16** by roughly **3–12×**, depending on the shape.
 
-Which is exactly what you expect when:
+This is pretty expected:
 
-- cuBLAS is tuned to death for BF16/FP16 Tensor Cores,
-- and your custom kernel is doing on-the-fly bit unpacking and scaling for int4 without using native int4 Tensor Core instructions or hyper-optimized layouts.
-
-From here, the interesting part is not “can we beat cuBLAS in three files of Triton”, but “what does this quantization scheme look like end-to-end when plugged into LLaMA’s linear layers and measured on perplexity + throughput” – that’s what the next tasks cover.
+- cuBLAS is heavily tuned for BF16/FP16 Tensor Cores,
+- our custom kernel does on-the-fly bit unpacking + scaling for int4, without using native int4 Tensor Core instructions or specialized layouts.
 
 ---
 
 ## Int4 Linear Layers in LLaMA-3.2-1B
-
-After the kernels were in place, the next step was to actually *swap them into a real model*.
 
 In [`quant_layer.py`](triton_int4/quant_layer.py):
 
@@ -131,9 +128,10 @@ Applied to `unsloth/Llama-3.2-1B-Instruct`, all dense layers (attention and MLP 
 
 To evaluate the quantized model end-to-end, [`eval_wikitext2.py`](triton_int4/eval_wikitext2.py) runs WikiText-2 (`wikitext-2-raw-v1`, `test` split) in next-token-prediction mode:
 
-- sequences are chunked to `seq_len=256`,
+- sequences are chunked to `seq_len = 256`,
 - batch size = 4,
-- metrics: perplexity and tokens per second (CUDA-timed).
+- metrics: perplexity and tokens per second (CUDA-timed),
+- Triton autotune is disabled to measure steady-state kernel performance.
 
 Final numbers:
 
@@ -142,5 +140,4 @@ Final numbers:
 | fp16 |     256 |          4 |   21.0905  | 27879.49  |
 | int4 |     256 |          4 |   29.0775  |  9749.81  |
 
-So with all linears quantized to int4 we get **≈4× smaller weights** (for the chosen scheme), a higher perplexity on WikiText-2 (about **+38%** relative), and an end-to-end throughput that is roughly **2.9× slower** than the original fp16 model on this setup.
-
+With all linears quantized to int4 we get **≈4× smaller weights** (for the chosen group-wise scheme), a higher perplexity on WikiText-2 (about **+38%** relative), and an end-to-end throughput that is roughly **2.9× slower** than the original fp16 model on this setup.
